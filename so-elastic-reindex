@@ -1,0 +1,122 @@
+#!/bin/bash
+. /usr/sbin/so-elastic-common
+
+SKIP=0
+
+#########################################
+# Options
+#########################################
+usage()
+{
+cat <<EOF
+Security Onion Elastic Re-Index
+  Options:
+  -h         This message
+  -i         Index(es) to re-index (wildcards need to be quoted)
+	     Ex. sudo ./so-elastic-reindex -i "logstash-*"
+  -y         Skip prompt
+EOF
+}
+
+while getopts 'i:h:y' OPTION; do
+  case "$OPTION" in
+    i)
+      INDEX="$OPTARG"
+      ;;
+    h)
+      echo
+      usage
+      echo
+      exit 0
+      ;;
+    y)
+      SKIP=1
+      ;;
+  esac
+done
+shift "$(($OPTIND -1))"
+
+if [ $SKIP -ne 1 ]; then
+
+	header "Security Onion Elastic Re-Index"
+	echo
+	echo "This script will stop Logstash while it re-indexes indices specified by the provided pattern ('$INDEX')."
+	echo
+	echo "If you would like to proceed, please type "YES" and hit ENTER."
+	echo
+
+	# Read user input
+	read INPUT
+	if [ "$INPUT" != "YES" ] ; then exit 0; fi
+fi
+# Check for all indices that match specified pattern
+for i in $(curl -s localhost:9200/$INDEX | jq 'keys[]' | sed 's/"//g' | sed 's/,//g'); do
+	# Double-check the keys we received back from JQ to see if index exists
+	INDEX_EXISTS=`curl -s localhost:9200/$i`
+	if `echo "$INDEX_EXISTS" | grep -q "index_not_found_exception"`; then 
+		echo "Found no indices matching that pattern ('$i').  Exiting..."
+		exit 0 
+	fi	
+	# Specify dummy index name
+	DUMMY=`echo $i\_dummy`
+	
+	# Commenting this section out for now, since we specify template when LS is loaded.
+	#
+	#if $(echo "$i" | grep logstash-beats); then
+	#	TEMPLATE="@/etc/logstash/beats-template.json"
+	#elif $(echo "$i" | grep logstash ); then
+	#	TEMPLATE="@/etc/logstash/logstash-template.json"
+	#else
+	#	TEMPLATE="@/etc/logstash/logstash-template.json"
+	#fi
+	echo
+
+	# Stop Logstash
+	echo "Stopping Logstash to prevent new documents from being written to indices..."
+	docker stop so-logstash
+		
+	# Create dummy index
+	echo "Creating index: $DUMMY for $i ..."
+	curl -s -XPUT "localhost:9200/$DUMMY?pretty" #> /dev/null 2&>1
+	# -H 'Content-Type: application/json' -d"$TEMPLATE" > /dev/null 2&>1
+	echo
+	
+	# Re-index original index to dummy index
+	echo "Re-indexing index: $i => $DUMMY ..."
+	curl -s -XPOST 'localhost:9200/_reindex?pretty' -H 'Content-Type: application/json' -d" { \"source\": { \"index\": \"$i\" }, \"dest\": { \"index\": \"$DUMMY\" } } " #> /dev/null 2&>1
+        echo
+
+	# Delete original index
+	echo "Deleting index: $i ..."
+	curl -s -XDELETE localhost:9200/$i #> /dev/null 2&>1
+	echo
+
+	# Create index with original name
+	echo "Creating new index: $i ..."
+	curl -s -XPUT "localhost:9200/$i?pretty" #> /dev/null 2&>1
+	#-H 'Content-Type: application/json' -d"$TEMPLATE" > /dev/null 2&>1
+	echo
+	
+	echo "Waiting for index to refresh..."
+	sleep 31s
+
+	# Re-index dummy index to original name
+	echo "Re-indexing index: $DUMMY => $i ..."
+	curl -s -XPOST 'localhost:9200/_reindex?pretty' -H 'Content-Type: application/json' -d" { \"source\": { \"index\": \"$DUMMY\" }, \"dest\": { \"index\": \"$i\" } } " #> /dev/null 2&>1
+	echo
+
+	# Delete dummy index
+	echo "Deleting index: $DUMMY ..."
+	curl -s -XDELETE localhost:9200/$DUMMY #> /dev/null 2&>1
+	echo
+	
+	# Start Logstash
+	echo "Startng Logstash..."
+	echo
+	so-elastic-start
+done
+
+	echo "Operation complete!"
+	echo
+	echo "Try navigating to Kibana and refreshing your index pattern(s) to confirm you are no longer receiving mapping conflicts."
+	echo
