@@ -133,7 +133,7 @@ for i in $(curl -s localhost:9200/$INDEX | jq 'keys[]' | sed 's/"//g' | sed 's/,
 	echo
 	
 	# Start Logstash
-	echo "Startng Logstash..."
+	echo "Starting Logstash..."
 	echo
 	so-elastic-start
 done
