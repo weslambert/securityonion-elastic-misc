@@ -43,7 +43,7 @@ Security Onion Elastic Re-Index
   -y         Skip prompt
 
 	     Ex. sudo ./so-elastic-reindex -i "logstash-*" -r "31s"
-	     Ex. sudo ./so-elastic-reindex -i "logstash-" -t "logstash"
+	     Ex. sudo ./so-elastic-reindex -i "logstash-*" -t "logstash"
 EOF
 }
 
