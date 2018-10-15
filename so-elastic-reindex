@@ -25,7 +25,7 @@ source $COMMON
 
 SKIP=0
 TEMPLATE=""
-WAIT="30s"
+#WAIT="3s"
 
 #########################################
 # Options
@@ -37,17 +37,13 @@ Security Onion Elastic Re-Index
   Options:
   -h         This message
   -i         Index(es) to re-index (wildcards need to be quoted)
-  -r 	     Specify refresh_interval 
-	     (should be template refresh_interval +1s) 
-  -t 	     Specify template (not to be used with refresh_interval)
   -y         Skip prompt
 
-	     Ex. sudo ./so-elastic-reindex -i "logstash-*" -r "31s"
-	     Ex. sudo ./so-elastic-reindex -i "logstash-*" -t "logstash"
+	     Ex. sudo ./so-elastic-reindex -i "logstash-*"
 EOF
 }
 
-while getopts 'i:t:r:hy' OPTION; do
+while getopts 'i:hy' OPTION; do
   case "$OPTION" in
     i)
       INDEX="$OPTARG"
@@ -58,12 +54,6 @@ while getopts 'i:t:r:hy' OPTION; do
       echo
       exit 0
       ;;
-    t)
-      TEMPLATE="$OPTARG"
-      ;;
-    r)
-      WAIT="$OPTARG"
-      ;;
     y)
       SKIP=1
       ;;
@@ -71,23 +61,11 @@ while getopts 'i:t:r:hy' OPTION; do
 done
 #shift "$(($OPTIND -1))"
 
-## Determine index refresh interval so we can specify our wait time
-if [ "$TEMPLATE" != "" ]; then
-        REFRESH_INTERVAL=$(curl -s localhost:9200/_template/$TEMPLATE | jq .[].settings.index.refresh_interval | sed s'/"//'g)
-	if [ "$REFRESH_INTERVAL" == "" ]; then
-		echo
-		echo "Template '$TEMPLATE' not found!  Exiting..."
-		echo
-		exit 1
-	fi
-	WAIT=$( echo $((${REFRESH_INTERVAL%?} + 1))"s")
-fi
-
 if [ $SKIP -ne 1 ]; then
 
 	header "Security Onion Elastic Re-Index"
 	echo
-	echo "This script will stop Logstash while it re-indexes indices specified by the provided pattern ('$INDEX') using a refresh interval of $WAIT."
+	echo "This script will stop Logstash while it re-indexes indices specified by the provided pattern ('$INDEX')." #using a refresh interval of $WAIT."
 	echo
 	echo "If you would like to proceed, please type "YES" and hit ENTER."
 	echo
@@ -97,16 +75,35 @@ if [ $SKIP -ne 1 ]; then
 	if [ "$INPUT" != "YES" ] ; then exit 0; fi
 fi
 
+echo "Please provide an index pattern for the indices you would like to re-index: [ENTER]"
+read INDEX
+
 # Stop Logstash
 echo
 echo "Stopping Logstash to prevent new documents from being written to indices..."
 docker stop so-logstash
 
 if docker ps | grep -q so-logstash; then
-	echo
-	echo "Logstash still running -- please stop before continuing..."
-	exit 1
+        echo
+        echo "Logstash still running -- please stop before continuing..."
+        exit 1
 else
+
+    # Check to see if we are still processing records
+    echo
+    echo "We will wait for 30 seconds, then check ES to see if records are still being processed..."
+    sleep 30s
+    PROCESSING="true"
+    while [ "$PROCESSING" = "true" ]; do
+        if curl -s localhost:9200/_cat/tasks | grep 'indices:data/write/bulk'; then
+            echo "Records still being processed...will wait another 10 secs..."
+            sleep 10s
+        else
+            echo "No records left to process!  Continuing..."
+	    PROCESSING="false"
+        fi
+    done
+
 	# Check for all indices that match specified pattern
 	for i in $(curl -s localhost:9200/$INDEX | jq 'keys[]' | sed 's/"//g' | sed 's/,//g'); do
 		# Double-check the keys we received back from JQ to see if index exists
@@ -126,11 +123,17 @@ else
 		curl -s -XPUT "localhost:9200/$DUMMY?pretty" #> /dev/null 2&>1
 		# -H 'Content-Type: application/json' -d"$TEMPLATE" > /dev/null 2&>1
 		echo
+
+                curl -s -XPUT "localhost:9200/$DUMMY/_settings" -H 'Content-Type: application/json' -d'{"index" : {"refresh_interval" : -1 }}'
+
 	
 		# Re-index original index to dummy index
 		echo "Re-indexing index: $i => $DUMMY ..."
 		curl -s -XPOST 'localhost:9200/_reindex?pretty' -H 'Content-Type: application/json' -d" { \"source\": { \"index\": \"$i\" }, \"dest\": { \"index\": \"$DUMMY\" } } " #> /dev/null 2&>1
         	echo
+
+		# We need to refresh the dummy index so it is available for copying immediately
+		curl -s -XPOST "localhost:9200/$DUMMY/_refresh"
 
 		# Delete original index
 		echo "Deleting index: $i ..."
@@ -143,8 +146,8 @@ else
 		#-H 'Content-Type: application/json' -d"$TEMPLATE" > /dev/null 2&>1
 		echo
 	
-		echo "Waiting $WAIT for index to refresh..."
-		sleep $WAIT
+		#echo "Waiting $WAIT for index to refresh..."
+		#sleep $WAIT
 
 		# Re-index dummy index to original name
 		echo "Re-indexing index: $DUMMY => $i ..."
@@ -155,12 +158,15 @@ else
 		echo "Deleting index: $DUMMY ..."
 		curl -s -XDELETE localhost:9200/$DUMMY #> /dev/null 2&>1
 		echo
+                
+                # Refresh our new index so we can see that everything is copied
+		curl -s -XPOST "localhost:9200/$i/_refresh"
 	done
 fi	
 # Start Logstash
 echo "Starting Logstash..."
 echo
-so-elastic-start
+so-logstash-start
 
 echo "Operation complete!"
 echo
