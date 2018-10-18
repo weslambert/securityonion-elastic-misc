@@ -37,7 +37,6 @@ Security Onion Elastic Re-Index
   Options:
   -h         This message
   -i         Index(es) to re-index (wildcards need to be quoted)
-  -y         Skip prompt
 
 	     Ex. sudo ./so-elastic-reindex -i "logstash-*"
 EOF
@@ -47,15 +46,13 @@ while getopts 'i:hy' OPTION; do
   case "$OPTION" in
     i)
       INDEX="$OPTARG"
+      SKIP=1
       ;;
     h)
       echo
       usage
       echo
       exit 0
-      ;;
-    y)
-      SKIP=1
       ;;
   esac
 done
@@ -65,7 +62,7 @@ if [ $SKIP -ne 1 ]; then
 
 	header "Security Onion Elastic Re-Index"
 	echo
-	echo "This script will stop Logstash while it re-indexes indices specified by the provided pattern ('$INDEX')." #using a refresh interval of $WAIT."
+	echo "This script will stop Logstash while it re-indexes indices specified by the provided pattern."
 	echo
 	echo "If you would like to proceed, please type "YES" and hit ENTER."
 	echo
@@ -73,17 +70,21 @@ if [ $SKIP -ne 1 ]; then
 	# Read user input
 	read INPUT
 	if [ "$INPUT" != "YES" ] ; then exit 0; fi
-fi
 
-echo "Please provide an index pattern for the indices you would like to re-index: [ENTER]"
-read INDEX
+        echo
+	echo "Please provide an index pattern for the indices you would like to re-index: [ENTER]"
+        echo
+	echo "Ex: logstash-bro-*"
+	echo
+	read INDEX
+fi
 
 # Stop Logstash
 echo
 echo "Stopping Logstash to prevent new documents from being written to indices..."
 docker stop so-logstash
 
-if docker ps | grep -q so-logstash; then
+if docker ps | grep so-logstash; then
         echo
         echo "Logstash still running -- please stop before continuing..."
         exit 1
