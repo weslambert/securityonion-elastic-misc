@@ -27,7 +27,8 @@ source $COMMON
 
 SKIP=0
 TEMPLATE=""
-SUFFIX="reindexed"
+DATE=`date +%Y.%m.%d`
+SUFFIX="reindexed-$DATE"
 
 function full_reindex() {
         # Check for all indices that match specified pattern
