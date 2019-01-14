@@ -27,6 +27,109 @@ source $COMMON
 
 SKIP=0
 TEMPLATE=""
+SUFFIX="reindexed"
+
+function full_reindex() {
+        # Check for all indices that match specified pattern
+        for i in $(curl -s localhost:9200/$INDEX | jq 'keys[]' | sed 's/"//g' | sed 's/,//g'); do
+                # Double-check the keys we received back from JQ to see if index exists
+                INDEX_EXISTS=`curl -s localhost:9200/$i`
+                if `echo "$INDEX_EXISTS" | grep -q "index_not_found_exception"`; then
+                echo "Found no indices matching that pattern ('$i').  Exiting..."
+                exit 0
+                fi
+
+                echo
+		DUMMY=`echo $i-$SUFFIX`
+		
+
+                # Create dummy index
+                echo "Creating index: $DUMMY for $i ..."
+                curl -s -XPUT "localhost:9200/$DUMMY?pretty" #> /dev/null 2&>1
+                # -H 'Content-Type: application/json' -d"$TEMPLATE" > /dev/null 2&>1
+                echo
+
+                curl -s -XPUT "localhost:9200/$DUMMY/_settings" -H 'Content-Type: application/json' -d'{"index" : {"refresh_interval" : -1 }}'
+
+
+                # Re-index original index to dummy index
+                echo "Re-indexing index: $i => $DUMMY ..."
+                curl -s -XPOST 'localhost:9200/_reindex?pretty' -H 'Content-Type: application/json' -d" { \"source\": { \"index\": \"$i\" }, \"dest\": { \"index\": \"$DUMMY\" } } " #> /dev/null 2&>1
+                echo
+
+                # We need to refresh the dummy index so it is available for copying immediately
+                curl -s -XPOST "localhost:9200/$DUMMY/_refresh"
+
+                # Delete original index
+                echo "Deleting index: $i ..."
+                curl -s -XDELETE localhost:9200/$i #> /dev/null 2&>1
+                echo
+
+                # Create index with original name
+                echo "Creating new index: $i ..."
+                curl -s -XPUT "localhost:9200/$i?pretty" #> /dev/null 2&>1
+                #-H 'Content-Type: application/json' -d"$TEMPLATE" > /dev/null 2&>1
+                echo
+
+                #echo "Waiting $WAIT for index to refresh..."
+                #sleep $WAIT
+
+                # Re-index dummy index to original name
+                echo "Re-indexing index: $DUMMY => $i ..."
+                curl -s -XPOST 'localhost:9200/_reindex?pretty' -H 'Content-Type: application/json' -d" { \"source\": { \"index\": \"$DUMMY\" }, \"dest\": { \"index\": \"$i\" } } " #> /dev/null 2&>1
+		echo
+
+                # Delete dummy index
+                echo "Deleting index: $DUMMY ..."
+                curl -s -XDELETE localhost:9200/$DUMMY #> /dev/null 2&>1
+                echo
+
+                # Refresh our new index so we can see that everything is copied
+                curl -s -XPOST "localhost:9200/$i/_refresh"
+        done
+}
+
+function alias_reindex(){
+	for i in $(curl -s localhost:9200/$INDEX | jq 'keys[]' | sed 's/"//g' | sed 's/,//g'); do
+                # Double-check the keys we received back from JQ to see if index exists
+                INDEX_EXISTS=`curl -s localhost:9200/$i`
+                if `echo "$INDEX_EXISTS" | grep -q "index_not_found_exception"`; then
+                echo "Found no indices matching that pattern ('$i').  Exiting..."
+                exit 0
+                fi
+
+                echo
+		DUMMY=`echo $i-$SUFFIX`
+
+                # Create dummy index
+                echo "Creating index: $DUMMY for $i ..."
+                curl -s -XPUT "localhost:9200/$DUMMY?pretty" #> /dev/null 2&>1
+                # -H 'Content-Type: application/json' -d"$TEMPLATE" > /dev/null 2&>1
+                echo
+
+                curl -s -XPUT "localhost:9200/$DUMMY/_settings" -H 'Content-Type: application/json' -d'{"index" : {"refresh_interval" : -1 }}'
+
+
+                # Re-index original index to dummy index
+                echo "Re-indexing index: $i => $DUMMY ..."
+                curl -s -XPOST 'localhost:9200/_reindex?pretty' -H 'Content-Type: application/json' -d" { \"source\": { \"index\": \"$i\" }, \"dest\": { \"index\": \"$DUMMY\" } } " #> /dev/null 2&>1
+                echo
+
+                # We need to refresh the dummy index so it is available for copying immediately
+                curl -s -XPOST "localhost:9200/$DUMMY/_refresh"
+   
+                # Delete original index
+                echo "Deleting index: $i ..."
+                curl -s -XDELETE localhost:9200/$i #> /dev/null 2&>1
+                echo
+
+		# Alias newly created index to original index name
+		curl -XPOST "localhost:9200/_aliases" -H 'Content-Type: application/json' -d" {    \"actions\" : [        { \"add\" : { \"index\" : \"$DUMMY\", \"alias\" : \"$i\" } }    ]}"
+
+
+	done	
+}
+
 #WAIT="3s"
 
 #########################################
@@ -37,15 +140,27 @@ usage()
 cat <<EOF
 Security Onion Elastic Re-Index
   Options:
+  -f         Full reindex (maintaining original index names)
+	     (The default option is to use a suffix of "reindexed", and alias the new
+	     index to the original index name, in an effort to be a quicker re-indexing 
+	     process.)
   -h         This message
   -i         Index(es) to re-index (wildcards need to be quoted)
+  -s         Suffix to use when creating new indices 
+	     Example: a value of "_reindexed" would result in an index 	     
+	     name like "logstash-ossec-2019-01.14_reindexed"
 
-	     Ex. sudo ./so-elastic-reindex -i "logstash-*"
+EXAMPLES:
+	     Re-index with aliases --> sudo ./so-elastic-reindex -i "logstash-*"
+	     Re-index with original index name --> sudo ./so-elastic-reindex -f -i "logstash-*"  
 EOF
 }
 
-while getopts 'i:hy' OPTION; do
+while getopts 'i:s:hyf' OPTION; do
   case "$OPTION" in
+    f)
+      FULL_REINDEX=1
+      ;;
     i)
       INDEX="$OPTARG"
       SKIP=1
@@ -55,6 +170,9 @@ while getopts 'i:hy' OPTION; do
       usage
       echo
       exit 0
+      ;;
+    s)
+      SUFFIX="$OPTARG"
       ;;
   esac
 done
@@ -105,66 +223,15 @@ else
 	    PROCESSING="false"
         fi
     done
+    
+    # See if we are performing full or alias-based re-indexing
+    if [[ "$FULL_REINDEX" -eq 1 ]]; then
+    	full_reindex
+    else
+	alias_reindex
+    fi
+fi
 
-	# Check for all indices that match specified pattern
-	for i in $(curl -s localhost:9200/$INDEX | jq 'keys[]' | sed 's/"//g' | sed 's/,//g'); do
-		# Double-check the keys we received back from JQ to see if index exists
-		INDEX_EXISTS=`curl -s localhost:9200/$i`
-		if `echo "$INDEX_EXISTS" | grep -q "index_not_found_exception"`; then 
-		echo "Found no indices matching that pattern ('$i').  Exiting..."
-		exit 0 
-		fi	
-	
-		# Specify dummy index name
-		DUMMY=`echo $i\_dummy`
-	
-		echo
-
-		# Create dummy index
-		echo "Creating index: $DUMMY for $i ..."
-		curl -s -XPUT "localhost:9200/$DUMMY?pretty" #> /dev/null 2&>1
-		# -H 'Content-Type: application/json' -d"$TEMPLATE" > /dev/null 2&>1
-		echo
-
-                curl -s -XPUT "localhost:9200/$DUMMY/_settings" -H 'Content-Type: application/json' -d'{"index" : {"refresh_interval" : -1 }}'
-
-	
-		# Re-index original index to dummy index
-		echo "Re-indexing index: $i => $DUMMY ..."
-		curl -s -XPOST 'localhost:9200/_reindex?pretty' -H 'Content-Type: application/json' -d" { \"source\": { \"index\": \"$i\" }, \"dest\": { \"index\": \"$DUMMY\" } } " #> /dev/null 2&>1
-        	echo
-
-		# We need to refresh the dummy index so it is available for copying immediately
-		curl -s -XPOST "localhost:9200/$DUMMY/_refresh"
-
-		# Delete original index
-		echo "Deleting index: $i ..."
-		curl -s -XDELETE localhost:9200/$i #> /dev/null 2&>1
-		echo
-
-		# Create index with original name
-		echo "Creating new index: $i ..."
-		curl -s -XPUT "localhost:9200/$i?pretty" #> /dev/null 2&>1
-		#-H 'Content-Type: application/json' -d"$TEMPLATE" > /dev/null 2&>1
-		echo
-	
-		#echo "Waiting $WAIT for index to refresh..."
-		#sleep $WAIT
-
-		# Re-index dummy index to original name
-		echo "Re-indexing index: $DUMMY => $i ..."
-		curl -s -XPOST 'localhost:9200/_reindex?pretty' -H 'Content-Type: application/json' -d" { \"source\": { \"index\": \"$DUMMY\" }, \"dest\": { \"index\": \"$i\" } } " #> /dev/null 2&>1
-		echo
-
-		# Delete dummy index
-		echo "Deleting index: $DUMMY ..."
-		curl -s -XDELETE localhost:9200/$DUMMY #> /dev/null 2&>1
-		echo
-                
-                # Refresh our new index so we can see that everything is copied
-		curl -s -XPOST "localhost:9200/$i/_refresh"
-	done
-fi	
 # Start Logstash
 echo "Starting Logstash..."
 echo
