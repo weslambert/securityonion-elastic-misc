@@ -1,0 +1,266 @@
+#!/bin/bash
+
+# Copyright 2014-2022 Security Onion Solutions, LLC
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+. /usr/sbin/so-common
+
+SKIP=0
+TEMPLATE=""
+#DATE=`date +%Y.%m.%d`
+SUFFIX="reindexed"
+
+function full_reindex() {
+        # Check for all indices that match specified pattern
+        for i in $(so-elasticsearch-query $INDEX | jq 'keys[]' | sed 's/"//g' | sed 's/,//g'); do
+                # Double-check the keys we received back from JQ to see if index exists
+                INDEX_EXISTS=`so-elasticsearch-query $i`
+                if `echo "$INDEX_EXISTS" | grep -q "index_not_found_exception"`; then
+                echo "Found no indices matching that pattern ('$i').  Exiting..."
+                exit 0
+                fi
+
+                echo
+		
+                NEWINDEX=`echo $i-$SUFFIX`
+		
+                # Create new index
+                echo "Creating index: $NEWINDEX for $i ..."
+                so-elasticsearch-query $NEWINDEX?pretty -XPUT
+                echo
+
+                so-elasticsearch-query $NEWINDEX/_settings -XPUT -d'{"index" : {"refresh_interval" : -1 }}'
+
+                # Re-index original index to new index
+                echo "Re-indexing index: $i => $NEWINDEX ..."
+                so-elasticsearch-query _reindex?pretty -XPOST -d" { \"source\": { \"index\": \"$i\" }, \"dest\": { \"index\": \"$NEWINDEX\" } } "
+                echo
+
+                # We need to refresh the new index so it is available for copying immediately
+                so-elasticsearch-query $NEWINDEX/_refresh -XPOST
+
+                # Delete original index
+                echo "Deleting index: $i ..."
+                so-elasticsearch-query $i -XDELETE
+                echo
+
+
+                # Create index with original name
+                echo "Creating new index: $i ..."
+                so-elasticsearch-query $i?pretty
+                echo
+
+                # Re-index new index to original name
+                echo "Re-indexing index: $NEWINDEX => $i ..."
+                so-elasticsearch-query _reindex?pretty -XPOST -d"{ \"source\": { \"index\": \"$NEWINDEX\" }, \"dest\": { \"index\": \"$i\" } }"
+		echo
+
+                # Delete new index
+                echo "Deleting index: $NEWINDEX ..."
+                so-elasticsearch-query $NEWINDEX -XDELETE
+                echo
+
+                # Refresh our new index so we can see that everything is copied
+                so-elasticsearch-query $i/_refresh -XPOST
+        done
+}
+
+function alias_reindex(){
+	for i in $(so-elasticsearch-query $INDEX | jq 'keys[]' | sed 's/"//g' | sed 's/,//g'); do
+                # Double-check the keys we received back from JQ to see if index exists
+                INDEX_EXISTS=`so-elasticsearch-query $i`
+                if `echo "$INDEX_EXISTS" | grep -q "index_not_found_exception"`; then
+                echo "Found no indices matching that pattern ('$i').  Exiting..."
+                exit 0
+                fi
+
+                echo
+		
+ 		NEWINDEX=`echo $i-$SUFFIX`
+
+                # Create new index
+                echo "Creating index: $NEWINDEX for $i ..."
+                echo
+		so-elasticsearch-query $NEWINDEX?pretty -XPUT
+                echo
+		echo
+
+                echo "Configuring index settings..."
+                echo
+		so-elasticsearch-query $NEWINDEX/_settings -XPUT -d'{"index" : {"refresh_interval" : -1 }}'
+		echo
+		echo
+
+                # Ensure Elasticsearch can no longer write to the original index
+                echo "Setting write-block for index..."
+                echo
+		so-elasticsearch-query $i/_settings -XPUT -d'{"index.blocks.read_only_allow_delete": true}'
+		echo
+		echo 
+               
+                # Re-index original index to new index
+                echo "Re-indexing index: $i => $NEWINDEX ..."
+                echo
+		echo "Re-index stats:"
+		echo "-----------------"
+		echo
+		time so-elasticsearch-query _reindex?pretty -XPOST -d" { \"source\": { \"index\": \"$i\" }, \"dest\": { \"index\": \"$NEWINDEX\" } } "
+                echo
+
+                # We need to refresh the new index 
+		echo
+		echo "Refreshing index..."
+                echo
+		so-elasticsearch-query $NEWINDEX/_refresh -XPOST
+		echo
+		echo
+   
+                # Delete original index
+                echo
+		echo "Deleting index: $i ..."
+                echo
+		so-elasticsearch-query $i -XDELETE
+                echo
+		echo
+
+		# Alias newly created index to original index name
+                echo
+		echo "Creating alias..."
+		echo
+		so-elasticsearch-query _aliases -XPOST -d" {    \"actions\" : [        { \"add\" : { \"index\" : \"$NEWINDEX\", \"alias\" : \"$i\" } }    ]}"
+		echo
+		echo
+	done	
+}
+
+#########################################
+# Options
+#########################################
+usage()
+{
+cat <<EOF
+Security Onion Elastic Re-Index
+  Options:
+  -f         Full reindex (maintaining original index names)
+	     (The default option is to use a suffix of "reindexed", and alias the new
+	     index to the original index name, in an effort to be a quicker re-indexing 
+	     process.)
+  -h         This message
+  -i         Index(es) to re-index (wildcards need to be quoted)
+  -l         Stop Logtash
+  -s         Suffix to use when creating new indices 
+	     Example: a value of "_reindexed" would result in an index 	     
+	     name like "so-zeek-2019-01.14-reindexed"
+
+EXAMPLES:
+	     Re-index with aliases --> sudo ./so-elastic-reindex -i "so-zeek-*"
+	     Re-index with original index name --> sudo ./so-elastic-reindex -f -i "so-zeek-*"  
+EOF
+}
+
+while getopts 'i:s:hyf' OPTION; do
+  case "$OPTION" in
+    f)
+      FULL_REINDEX=1
+      ;;
+    h)
+      echo
+      usage
+      echo
+      exit 0
+      ;;
+    i)
+      INDEX="$OPTARG"
+      SKIP=1
+      ;;
+    l)
+      STOP_LOGSTASH=1
+      ;;
+    s)
+      SUFFIX="$OPTARG"
+      ;;
+  esac
+done
+
+if [ $SKIP -ne 1 ]; then
+
+	header "Security Onion Elasticsearch Re-Index"
+	echo
+        if [[ "$STOP_LOGSTASH" -eq 1 ]]; then
+		echo "This script will stop Logstash while it re-indexes indices specified by the provided pattern."
+	fi
+	echo
+	echo "If you would like to proceed, please type "YES" and hit ENTER."
+	echo
+
+	# Read user input
+	read INPUT
+	if [ "$INPUT" != "YES" ] ; then exit 0; fi
+
+        echo
+	echo "Please provide an index pattern for the indices you would like to re-index: [ENTER]"
+        echo
+	echo "Ex: so-zeek-*"
+	echo
+	read INDEX
+fi
+
+if [[ "$STOP_LOGSTASH" -eq 1 ]]; then
+	# Stop Logstash
+	echo
+	echo "Stopping Logstash to prevent new documents from being written to indices..."
+	docker stop so-logstash
+fi
+
+#if docker ps | grep so-logstash; then
+#        echo
+#        echo "Logstash still running -- please stop before continuing..."
+#        exit 1
+#else
+#
+#    # Check to see if we are still processing records
+#    echo
+#    echo "We will wait for 30 seconds, then check ES to see if records are still being processed..."
+#    sleep 30s
+#    PROCESSING="true"
+#    while [ "$PROCESSING" = "true" ]; do
+#        if  so-elasticsearch-query _cat/tasks | grep 'indices:data/write/bulk'; then
+#            echo "Records still being processed...will wait another 10 secs..."
+#            sleep 10s
+#        else
+#            echo "No records left to process!  Continuing..."
+#	    PROCESSING="false"
+#        fi
+#    done
+    
+    # See if we are performing full or alias-based re-indexing
+    if [[ "$FULL_REINDEX" -eq 1 ]]; then
+    	full_reindex
+    else
+	    alias_reindex
+    fi
+#fi
+
+if [[ "$STOP_LOGSTASH" -eq 1 ]]; then
+	# Start Logstash
+	echo "Starting Logstash..."
+	echo
+	so-logstash-start
+fi
+
+echo "Operation complete!"
+echo
+echo "If you were previously receiving mapping conflicts in Kibana, please try refreshing your index pattern(s) to confirm you are no longer having issues."
+echo
